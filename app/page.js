@@ -431,8 +431,34 @@ function isNamedTwin(key) {
 // Construye el hilo de mensajes desde la perspectiva de un twin específico.
 // Sus propias respuestas van como "assistant"; las de otros twins van como
 // contexto de usuario con su nombre, para que pueda reaccionar a ellas.
-function buildApiMessages(messages, twinKey, multi) {
+// Quita el bloque de material de un mensaje, dejando solo una nota de que existió
+function stripMaterial(content, fileName) {
+  var i1 = content.indexOf("\n\n---\nMATERIAL DE REFERENCIA");
+  if (i1 === -1) i1 = content.indexOf("\n\n---\nRESUMEN DEL MATERIAL");
+  if (i1 === -1) return content;
+  return content.substring(0, i1).trim() +
+    "\n\n[Adjuntó el documento \"" + (fileName || "sin nombre") + "\", que ya se comentó antes en esta conversación. Su contenido no se repite aquí.]";
+}
+
+function buildApiMessages(messages, twinKey, multi, compact) {
   var out = [];
+
+  // Si la conversación fue compactada, los mensajes viejos no se reenvían:
+  // en su lugar va un resumen. Esto es invisible para la persona: la pantalla no cambia.
+  if (compact && compact.upToTs) {
+    messages = messages.filter(function(m) { return !m.ts || m.ts > compact.upToTs; });
+    out.push({ role: "user", content: "Resumen de la parte anterior de esta conversación:\n\n" + compact.summary });
+  }
+
+  // Solo el ÚLTIMO documento adjuntado va completo; los anteriores se resumen a una nota.
+  // Esto evita reenviar todos los documentos en cada pregunta (ahorra tokens y evita confusión).
+  var lastMatIdx = -1;
+  for (var q = messages.length - 1; q >= 0; q--) {
+    var mq = messages[q];
+    if (mq.role === "user" && (mq.apiContent || "").indexOf("---\nMATERIAL DE REFERENCIA") !== -1) { lastMatIdx = q; break; }
+    if (mq.role === "user" && (mq.apiContent || "").indexOf("---\nRESUMEN DEL MATERIAL") !== -1) { lastMatIdx = q; break; }
+  }
+
   function push(role, content) {
     if (out.length > 0 && out[out.length - 1].role === role) {
       out[out.length - 1].content += "\n\n" + content;
@@ -444,6 +470,15 @@ function buildApiMessages(messages, twinKey, multi) {
     var m = messages[i];
     if (m.role === "user") {
       var content = m.apiContent || m.text;
+      if (lastMatIdx !== -1 && i !== lastMatIdx) {
+        // Los resúmenes son livianos y se conservan (memoria de documentos anteriores).
+        // Solo se recorta el material pesado que no alcanzó a resumirse.
+        if (content.length > 6000) content = stripMaterial(content, m.fileName);
+      } else if (i === lastMatIdx) {
+        content = content
+          .replace("---\nMATERIAL DE REFERENCIA", "---\nESTE ES EL DOCUMENTO EN DISCUSIÓN AHORA. Tu respuesta debe ser sobre ESTE material, no sobre documentos anteriores de la conversación.\nMATERIAL DE REFERENCIA")
+          .replace("---\nRESUMEN DEL MATERIAL", "---\nESTE ES EL DOCUMENTO EN DISCUSIÓN AHORA. Tu respuesta debe ser sobre ESTE material, no sobre documentos anteriores de la conversación.\nRESUMEN DEL MATERIAL");
+      }
       if (i === 0 && multi) {
         content = "(Estás en una mesa de discusión con otras personas del equipo. Sus intervenciones aparecen marcadas con su nombre. Reacciona con tu propio criterio — puedes coincidir o discrepar, pero no repitas lo que ya dijeron.)\n\n" + content;
       }
@@ -532,8 +567,8 @@ async function callTwin(systemPrompt, messages, imageBase64, imageMime) {
       body: JSON.stringify(payload),
     });
     var data = await res.json();
-    if (data.error) return { text: "⚠️ " + data.error, canSummarize: !!data.canSummarize };
-    return { text: data.text };
+    if (data.error) return { text: "⚠️ " + data.error, canSummarize: !!data.canSummarize, errorKind: data.errorKind || null, limits: data.limits || null };
+    return { text: data.text, limits: data.limits || null };
   } catch (e) { return { text: "⚠️ Error de conexión. Intenta de nuevo." }; }
 }
 
@@ -619,7 +654,7 @@ function ConfidenceBadge({ level, reason }) {
   );
 }
 
-function MessageBubble({ msg, showSpeaker, onSaveLearning, isSaved, onRetrySummary }) {
+function MessageBubble({ msg, showSpeaker, onSaveLearning, isSaved, onRetrySummary, onHandoff, handoffBusy }) {
   var isUser = msg.role === "user";
   var info = !isUser ? twinInfo(msg.twinKey) : null;
   var speakerName = info ? info.member.name : "Twin";
@@ -654,6 +689,16 @@ function MessageBubble({ msg, showSpeaker, onSaveLearning, isSaved, onRetrySumma
             })}
           </div>
         </div>
+        {onHandoff && (
+          <button onClick={onHandoff} disabled={handoffBusy} className={handoffBusy ? "" : "fa-hover"} style={{
+            marginTop: 8, display: "inline-flex", alignItems: "center", gap: 7,
+            padding: "8px 16px", borderRadius: 999, background: handoffBusy ? YELLOW_TINT : YELLOW,
+            border: "1px solid " + YELLOW, color: INK, fontSize: 12.5,
+            fontFamily: MONO, fontWeight: 700, cursor: handoffBusy ? "default" : "pointer",
+          }}>
+            {handoffBusy ? "Generando contexto..." : "→ Abrir chat nuevo con el contexto"}
+          </button>
+        )}
         {onRetrySummary && (
           <button onClick={onRetrySummary} className="fa-hover" style={{
             marginTop: 8, display: "inline-flex", alignItems: "center", gap: 7,
@@ -693,7 +738,7 @@ function MessageBubble({ msg, showSpeaker, onSaveLearning, isSaved, onRetrySumma
 }
 
 // ─── VISTA CHAT (pantalla completa, multi-twin) ──────────────────────────────
-function ChatView({ conv, typingTwinKey, onBack, onSend, onAddTwin, onSaveLearning, savedIds, onRetrySummary }) {
+function ChatView({ conv, typingTwinKey, onBack, onSend, onAddTwin, onSaveLearning, savedIds, onRetrySummary, onHandoff, handoffBusy, limits }) {
   var participants = conv.twinKeys.map(twinInfo).filter(Boolean);
   var multi = conv.twinKeys.length > 1;
   var pending = !!typingTwinKey;
@@ -817,7 +862,9 @@ function ChatView({ conv, typingTwinKey, onBack, onSend, onAddTwin, onSaveLearni
           return <MessageBubble key={i} msg={msg} showSpeaker={true}
             onSaveLearning={msg.role === "assistant" ? function(m) { onSaveLearning(conv, m); } : null}
             isSaved={msg.role === "assistant" && savedIds.indexOf(conv.id + ":" + msg.ts) !== -1}
-            onRetrySummary={msg.retrySummary && onRetrySummary && !typingTwinKey ? function() { onRetrySummary(conv.id, msg.retryTwinKey); } : null} />;
+            onRetrySummary={msg.retrySummary && onRetrySummary && !typingTwinKey ? function() { onRetrySummary(conv.id, msg.retryTwinKey); } : null}
+            onHandoff={msg.errorKind === "accumulated" && onHandoff ? function() { onHandoff(conv.id); } : null}
+            handoffBusy={handoffBusy} />;
         })}
         {pending && typingInfo && (
           <div className="fa-msg" style={{ display: "flex", gap: 10, marginBottom: 12 }}>
@@ -886,6 +933,65 @@ function ChatView({ conv, typingTwinKey, onBack, onSend, onAddTwin, onSaveLearni
             transition: "transform 0.1s, background 0.15s",
           }}>→</button>
         </div>
+        <UsageBar limits={limits} />
+      </div>
+    </div>
+  );
+}
+
+// ─── BARRA DE CONSUMO (izq: tokens por minuto · der: consultas del día) ──────
+function UsageBar({ limits }) {
+  if (!limits) return null;
+
+  function pctUsed(limit, remaining) {
+    if (!limit || remaining === null || remaining === undefined) return null;
+    return Math.max(0, Math.min(100, ((limit - remaining) / limit) * 100));
+  }
+  function colorFor(p) {
+    if (p >= 85) return "#c0392b";
+    if (p >= 60) return "#d68910";
+    return INK;
+  }
+
+  var tPct = pctUsed(limits.tokensLimit, limits.tokensRemaining);
+  var rPct = pctUsed(limits.reqLimit, limits.reqRemaining);
+  if (tPct === null && rPct === null) return null;
+
+  var tReset = limits.tokensReset ? String(limits.tokensReset).trim() : null;
+  var rRem = limits.reqRemaining;
+
+  var barStyle = { width: 110, height: 5, borderRadius: 3, background: "rgba(20,20,20,0.08)", overflow: "hidden", flexShrink: 0 };
+  var labelStyle = { fontSize: 10, fontFamily: MONO, color: TEXT_MUTED, whiteSpace: "nowrap" };
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16,
+      padding: "8px 16px", marginTop: 8,
+      background: CARD, border: "1px solid " + BORDER, borderRadius: 999,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+        {tPct !== null && (
+          <span style={labelStyle}>
+            {"Minuto: " + Math.round(tPct) + "%"}{tReset ? " · repone en " + tReset : ""}
+          </span>
+        )}
+        {tPct !== null && (
+          <div style={barStyle}>
+            <div style={{ width: tPct + "%", height: "100%", background: colorFor(tPct), borderRadius: 3, transition: "width 0.4s" }} />
+          </div>
+        )}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+        {rPct !== null && (
+          <div style={barStyle}>
+            <div style={{ width: rPct + "%", height: "100%", background: colorFor(rPct), borderRadius: 3, transition: "width 0.4s" }} />
+          </div>
+        )}
+        {rPct !== null && (
+          <span style={labelStyle}>
+            {"Hoy: " + Math.round(rPct) + "%"}{(rRem !== null && rRem !== undefined) ? " · quedan " + Math.round(rRem) : ""}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -1479,10 +1585,47 @@ export default function Home() {
       if (thread[j].role === "user") { lastUser = thread[j]; break; }
     }
 
-    // Mesa con material grande: resumir UNA sola vez y reusar el resumen para todos los twins
-    if (twinKeys.length > 1 && lastUser && lastUser.apiContent) {
+    // AUTO-COMPACTACIÓN: si la conversación creció mucho, se resume la parte antigua
+    // una sola vez y se guarda. La persona sigue viendo el chat completo en pantalla.
+    var convNow = history.filter(function(c) { return c.id === convId; })[0];
+    var compactState = (convNow && convNow.compact) || null;
+    var MAX_CHARS = 20000;
+    var KEEP_RECENT = 4;
+
+    var liveMsgs = thread.filter(function(m) { return !compactState || !m.ts || m.ts > compactState.upToTs; });
+    var liveChars = 0;
+    for (var lc = 0; lc < liveMsgs.length; lc++) {
+      liveChars += ((liveMsgs[lc].apiContent || liveMsgs[lc].text) || "").length;
+    }
+
+    if (liveChars > MAX_CHARS && liveMsgs.length > KEEP_RECENT + 1) {
+      var toCompact = liveMsgs.slice(0, liveMsgs.length - KEEP_RECENT);
+      var cutTs = toCompact[toCompact.length - 1].ts;
+      var prevSummary = compactState ? "Resumen previo:\n" + compactState.summary + "\n\n" : "";
+      var transcriptC = prevSummary + toCompact.map(function(m) {
+        if (m.role === "user") return "Nicole: " + ((m.apiContent || m.text) || "");
+        var iC = twinInfo(m.twinKey);
+        return (iC ? iC.member.name : "Twin") + ": " + (m.text || "");
+      }).join("\n\n");
+
+      try {
+        var cres = await fetch("/api/sparring", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ compactHistory: transcriptC.slice(0, 24000) }),
+        });
+        var cdata = await cres.json();
+        if (cdata && cdata.compact) {
+          compactState = { upToTs: cutTs, summary: cdata.compact };
+          updateConv(convId, function(c) { return Object.assign({}, c, { compact: compactState }); });
+        }
+      } catch (e) {}
+    }
+
+    // OPCIÓN A: todo documento adjuntado se resume UNA sola vez y el resumen queda guardado
+    // en la conversación. Desde ahí los twins siempre trabajan con el resumen, nunca con el texto completo.
+    if (lastUser && lastUser.apiContent) {
       var mIdx = lastUser.apiContent.indexOf("---\nMATERIAL DE REFERENCIA");
-      if (mIdx !== -1 && lastUser.apiContent.substring(mIdx).length > 14000) {
+      if (mIdx !== -1 && lastUser.apiContent.substring(mIdx).length > 3000) {
         setTyping(function(prev) { var next = Object.assign({}, prev); next[convId] = twinKeys[0]; return next; });
         var qPart = lastUser.apiContent.substring(0, mIdx).trim();
         var mPart = lastUser.apiContent.substring(mIdx);
@@ -1493,9 +1636,12 @@ export default function Home() {
           });
           var sdata = await sres.json();
           if (sdata && sdata.summary) {
-            var summarizedContent = qPart + "\n\n---\nRESUMEN DEL MATERIAL:\n" + sdata.summary;
+            var summarizedContent = qPart + "\n\n---\nRESUMEN DEL MATERIAL" +
+              (lastUser.fileName ? " (" + lastUser.fileName + ")" : "") + ":\n" + sdata.summary;
             var targetUser = lastUser;
             thread = thread.map(function(m) { return m === targetUser ? Object.assign({}, m, { apiContent: summarizedContent }) : m; });
+            var persistThread = thread;
+            updateConv(convId, function(c) { return Object.assign({}, c, { messages: persistThread }); });
           }
         } catch (e) {}
       }
@@ -1508,9 +1654,10 @@ export default function Home() {
       }
       setTyping(function(prev) { var next = Object.assign({}, prev); next[convId] = key; return next; });
       var info = twinInfo(key);
-      var apiMessages = buildApiMessages(thread, key, multi);
+      var apiMessages = buildApiMessages(thread, key, multi, compactState);
       var resp = await callTwin(info.member.prompt, apiMessages, img ? img.base64 : null, img ? img.mime : null);
       var raw = resp.text;
+      if (resp.limits) setLimits(resp.limits);
       var parsedResp = parseConfidence(raw);
       var ts = Date.now();
       var named = isNamedTwin(key);
@@ -1525,7 +1672,10 @@ export default function Home() {
         });
       }
       var asstMsg = { role: "assistant", twinKey: key, text: parsedResp.clean, confidence: named ? parsedResp.level : null, confidenceReason: named ? parsedResp.reason : null, ts: ts };
-      if (raw.indexOf("⚠️") === 0 && resp.canSummarize) { asstMsg.retrySummary = true; asstMsg.retryTwinKey = key; }
+      if (raw.indexOf("⚠️") === 0) {
+        if (resp.canSummarize) { asstMsg.retrySummary = true; asstMsg.retryTwinKey = key; }
+        if (resp.errorKind) asstMsg.errorKind = resp.errorKind;
+      }
       thread = thread.concat([asstMsg]);
       var threadSnapshot = thread;
       updateConv(convId, function(c) {
@@ -1575,6 +1725,52 @@ export default function Home() {
 
     await runTwins(conv.id, twinKeys, conv.messages, multi, img);
     setRunning(false);
+  };
+
+  var hoState = useState(false); var handoffBusy = hoState[0]; var setHandoffBusy = hoState[1];
+  var limState = useState(null); var limits = limState[0]; var setLimits = limState[1];
+
+  // Genera un resumen de la conversación y abre un chat nuevo con ese contexto cargado
+  var createHandoffChat = async function(convId) {
+    if (handoffBusy) return;
+    var conv = history.filter(function(c) { return c.id === convId; })[0];
+    if (!conv) return;
+    setHandoffBusy(true);
+    var transcript = conv.messages.map(function(m) {
+      if (m.role === "user") return "Nicole: " + (m.text || "") + (m.fileName ? " [adjuntó: " + m.fileName + "]" : "");
+      var info = twinInfo(m.twinKey);
+      var who = info ? info.member.name : "Twin";
+      return who + ": " + (m.text || "");
+    }).join("\n\n");
+
+    var summary = null;
+    try {
+      var hres = await fetch("/api/sparring", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ handoffConversation: transcript.slice(0, 20000) }),
+      });
+      var hdata = await hres.json();
+      if (hdata && hdata.handoff) summary = hdata.handoff;
+    } catch (e) {}
+    setHandoffBusy(false);
+    if (!summary) return;
+
+    var now = Date.now();
+    var newConv = {
+      id: "conv-" + now,
+      twinKeys: conv.twinKeys.slice(),
+      firstQuestion: "Continuación: " + (conv.firstQuestion || "conversación anterior"),
+      startedAt: now,
+      updatedAt: now,
+      messages: [{
+        role: "user",
+        text: "📎 Contexto de la conversación anterior:\n\n" + summary,
+        apiContent: "Estamos continuando una conversación anterior. Este es el contexto de lo que ya se discutió:\n\n" + summary,
+        ts: now,
+      }],
+    };
+    setHistory(function(prev) { return [newConv].concat(prev); });
+    setView({ type: "chat", id: newConv.id });
   };
 
   var retryWithSummary = async function(convId, twinKey) {
@@ -1722,6 +1918,9 @@ export default function Home() {
               onSaveLearning={saveLearning}
               savedIds={savedIds}
               onRetrySummary={retryWithSummary}
+              onHandoff={createHandoffChat}
+              handoffBusy={handoffBusy}
+              limits={limits}
             />
           ) : view.type === "prompts" ? (
             <div style={{ paddingTop: 44 }}>
