@@ -5,6 +5,7 @@ export async function POST(request) {
   var systemPrompt = body.systemPrompt;
   var messages = body.messages;
 
+  var extraCalls = 0;
   var apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
     return Response.json({ error: "API key not configured" }, { status: 500 });
@@ -28,7 +29,7 @@ export async function POST(request) {
       });
       var cdata = await cres.json();
       if (cdata.choices && cdata.choices[0]) {
-        return Response.json({ compact: cdata.choices[0].message.content });
+        return Response.json({ compact: cdata.choices[0].message.content, apiCalls: 1 });
       }
       return Response.json({ error: "No se pudo compactar" }, { status: 500 });
     } catch (e) {
@@ -54,7 +55,7 @@ export async function POST(request) {
       });
       var hdata = await hres.json();
       if (hdata.choices && hdata.choices[0]) {
-        return Response.json({ handoff: hdata.choices[0].message.content });
+        return Response.json({ handoff: hdata.choices[0].message.content, apiCalls: 1 });
       }
       return Response.json({ error: "No se pudo generar el contexto" }, { status: 500 });
     } catch (e) {
@@ -66,7 +67,7 @@ export async function POST(request) {
   if (body.summarizeMaterial) {
     try {
       var summ = await summarizeText(apiKey, String(body.summarizeMaterial));
-      return Response.json({ summary: summ });
+      return Response.json({ summary: summ.text, apiCalls: summ.calls });
     } catch (e) {
       return Response.json({ error: "No se pudo resumir el material" }, { status: 500 });
     }
@@ -82,7 +83,7 @@ export async function POST(request) {
 
   // If fits within limit, send directly
   if (totalEstimate < 11000) {
-    return await callGroq(apiKey, systemPrompt, messages, 900);
+    return await callGroq(apiKey, systemPrompt, messages, 900, extraCalls);
   }
 
   // Otherwise: chunk and summarize the largest user message
@@ -114,18 +115,20 @@ export async function POST(request) {
   // If material is short enough after split, send directly
   var afterSplitEstimate = systemTokens + Math.ceil(questionPart.length / 4) + Math.ceil(materialPart.length / 4) + 900;
   if (afterSplitEstimate < 11000 || materialPart.length < 28000) {
-    return await callGroq(apiKey, systemPrompt, messages, 900);
+    return await callGroq(apiKey, systemPrompt, messages, 900, extraCalls);
   }
 
   // Resumir el material (una sola pasada). Si es una mesa, el frontend ya lo resumió antes y no llega acá.
-  var compressedMaterial = await summarizeText(apiKey, materialPart);
+  var summObj = await summarizeText(apiKey, materialPart);
+  var compressedMaterial = summObj.text;
+  extraCalls = summObj.calls;
   await new Promise(function(r) { setTimeout(r, 12000); });
   var newContent = questionPart + "\n\n---\nRESUMEN DEL MATERIAL:\n" + compressedMaterial;
 
   var newMessages = messages.slice();
   newMessages[largestIdx] = { role: messages[largestIdx].role, content: newContent };
 
-  return await callGroq(apiKey, systemPrompt, newMessages, 900);
+  return await callGroq(apiKey, systemPrompt, newMessages, 900, extraCalls);
 }
 
 // ─── AUTO-RETRY: if rate limited, wait and retry up to 3 times ───────────────
@@ -186,7 +189,7 @@ async function summarizeText(apiKey, materialPart) {
     }
   }
 
-  return summaries.join("\n\n");
+  return { text: summaries.join("\n\n"), calls: chunks.length };
 }
 
 function fmtNum(n) {
@@ -261,7 +264,7 @@ function classifyLimit(res, data, lastUserChars, totalChars) {
   return { kind: "rate_minute", message: m2 };
 }
 
-async function callGroq(apiKey, systemPrompt, messages, maxTokens) {
+async function callGroq(apiKey, systemPrompt, messages, maxTokens, extraCalls) {
   var groqMessages = [{ role: "system", content: systemPrompt }];
   for (var i = 0; i < messages.length; i++) {
     groqMessages.push({ role: messages[i].role, content: messages[i].content });
@@ -308,6 +311,7 @@ async function callGroq(apiKey, systemPrompt, messages, maxTokens) {
         errorKind: cls.kind,
         canSummarize: hasBigMaterial && cls.kind === "single_too_big",
         limits: readLimits(res),
+        apiCalls: 1 + (extraCalls || 0),
       }, { status: 429 });
     }
 
@@ -316,7 +320,7 @@ async function callGroq(apiKey, systemPrompt, messages, maxTokens) {
     }
 
     var text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "Sin respuesta.";
-    return Response.json({ text: text, limits: readLimits(res) });
+    return Response.json({ text: text, limits: readLimits(res), apiCalls: 1 + (extraCalls || 0) });
 
   } catch (err) {
     return Response.json({ error: "Error de conexión con Groq" }, { status: 500 });
