@@ -440,6 +440,31 @@ function stripMaterial(content, fileName) {
     "\n\n[Adjuntó el documento \"" + (fileName || "sin nombre") + "\", que ya se comentó antes en esta conversación. Su contenido no se repite aquí.]";
 }
 
+// ─── CONTADOR DIARIO DE CONSULTAS ────────────────────────────────────────────
+// Groq repone su cupo de forma continua, así que su header no sirve para saber
+// cuántas consultas llevas HOY. Este contador es propio y se reinicia a medianoche UTC.
+var LS_DAILY = "fahreai_daily_v1";
+
+function utcDayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function readDaily() {
+  try {
+    var raw = JSON.parse(localStorage.getItem(LS_DAILY) || "null");
+    if (raw && raw.day === utcDayKey()) return raw.count || 0;
+  } catch (e) {}
+  return 0;
+}
+
+function bumpDaily(n) {
+  try {
+    var c = readDaily() + (n || 1);
+    localStorage.setItem(LS_DAILY, JSON.stringify({ day: utcDayKey(), count: c }));
+    return c;
+  } catch (e) { return 0; }
+}
+
 function buildApiMessages(messages, twinKey, multi, compact) {
   var out = [];
 
@@ -567,6 +592,7 @@ async function callTwin(systemPrompt, messages, imageBase64, imageMime) {
       body: JSON.stringify(payload),
     });
     var data = await res.json();
+    bumpDaily(data.apiCalls || 1);
     if (data.error) return { text: "⚠️ " + data.error, canSummarize: !!data.canSummarize, errorKind: data.errorKind || null, limits: data.limits || null };
     return { text: data.text, limits: data.limits || null };
   } catch (e) { return { text: "⚠️ Error de conexión. Intenta de nuevo." }; }
@@ -959,9 +985,10 @@ function UsageBar({ limits }) {
   }
   var tPct = Math.max(0, Math.min(100, ((tokensLimit - effRemaining) / tokensLimit) * 100));
 
-  var reqLimit = limits && limits.reqLimit ? limits.reqLimit : null;
-  var reqRem = limits && limits.reqRemaining !== null && limits.reqRemaining !== undefined ? limits.reqRemaining : null;
-  var rPct = (reqLimit && reqRem !== null) ? Math.max(0, Math.min(100, ((reqLimit - reqRem) / reqLimit) * 100)) : 0;
+  // Consultas de hoy: contador propio, releído en cada tick (el reinicio UTC es automático)
+  var dayLimit = (limits && limits.reqLimit) || 1000;
+  var dayUsed = readDaily();
+  var rPct = Math.max(0, Math.min(100, (dayUsed / dayLimit) * 100));
 
   function colorFor(p) {
     if (p >= 85) return "#c0392b";
@@ -991,7 +1018,7 @@ function UsageBar({ limits }) {
           <div style={{ width: rPct + "%", height: "100%", background: colorFor(rPct), borderRadius: 3, transition: "width 0.4s" }} />
         </div>
         <span style={labelStyle}>
-          {"Hoy: " + Math.round(rPct) + "%"}{reqRem !== null ? " · quedan " + Math.round(reqRem) + " consultas" : ""}
+          {"Hoy: " + Math.round(rPct) + "% · " + dayUsed + " de " + dayLimit + " consultas"}
         </span>
       </div>
     </div>
@@ -1615,6 +1642,7 @@ export default function Home() {
           body: JSON.stringify({ compactHistory: transcriptC.slice(0, 24000) }),
         });
         var cdata = await cres.json();
+        bumpDaily((cdata && cdata.apiCalls) || 1);
         if (cdata && cdata.compact) {
           compactState = { upToTs: cutTs, summary: cdata.compact };
           updateConv(convId, function(c) { return Object.assign({}, c, { compact: compactState }); });
@@ -1650,6 +1678,7 @@ export default function Home() {
             body: JSON.stringify({ summarizeMaterial: mPart }),
           });
           var sdata = await sres.json();
+          bumpDaily((sdata && sdata.apiCalls) || 1);
           if (sdata && sdata.summary) {
             var summarizedContent = qPart + "\n\n---\nRESUMEN DEL MATERIAL" +
               (lastUser.fileName ? " (" + lastUser.fileName + ")" : "") + ":\n" + sdata.summary;
@@ -1792,6 +1821,7 @@ export default function Home() {
         body: JSON.stringify({ handoffConversation: transcript.slice(0, 20000) }),
       });
       var hdata = await hres.json();
+      bumpDaily((hdata && hdata.apiCalls) || 1);
       if (hdata && hdata.handoff) summary = hdata.handoff;
     } catch (e) {}
     setHandoffBusy(false);
@@ -1835,6 +1865,7 @@ export default function Home() {
         body: JSON.stringify({ summarizeMaterial: mPart }),
       });
       var sdata = await sres.json();
+      bumpDaily((sdata && sdata.apiCalls) || 1);
       if (sdata && sdata.summary) newContent = qPart + "\n\n---\nRESUMEN DEL MATERIAL:\n" + sdata.summary;
     } catch (e) {}
     if (!newContent) {
