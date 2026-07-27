@@ -109,7 +109,7 @@ async function summarizeText(apiKey, materialPart) {
 
     var sumMessages = [{
       role: "user",
-      content: "Resume el siguiente texto de forma densa y precisa, capturando TODOS los puntos clave, datos, argumentos y detalles importantes. No omitas información relevante. Responde solo con el resumen, sin introducción:\n\n" + chunks[ci]
+      content: "Resume el siguiente texto de forma MUY compacta pero completa: captura marca, objetivo, insight, estrategia, rutas creativas y datos clave en el menor número de palabras posible. Sin relleno, sin repetir, sin introducción. Solo el resumen:\n\n" + chunks[ci]
     }];
 
     try {
@@ -119,7 +119,7 @@ async function summarizeText(apiKey, materialPart) {
         body: JSON.stringify({
           model: "llama-3.3-70b-versatile",
           messages: [{ role: "system", content: "Eres un asistente que resume textos de forma densa y precisa en español." }].concat(sumMessages),
-          max_tokens: 1000,
+          max_tokens: 650,
           temperature: 0.3,
         }),
       });
@@ -135,6 +135,39 @@ async function summarizeText(apiKey, materialPart) {
   }
 
   return summaries.join("\n\n");
+}
+
+function fmtNum(n) {
+  n = parseInt(n, 10);
+  if (isNaN(n)) return null;
+  return n.toLocaleString("es-PE");
+}
+
+function buildRateMsg(res, data) {
+  var msg = (data && data.error && data.error.message) || "";
+  var esDia = /per day|\(TPD\)|\(RPD\)/i.test(msg);
+  var esTokens = /token/i.test(msg) || !/request/i.test(msg);
+  var limit = (msg.match(/Limit\s+([\d.]+)/i) || [])[1];
+  var used = (msg.match(/Used\s+([\d.]+)/i) || [])[1];
+  if (!limit) limit = res.headers.get(esTokens ? "x-ratelimit-limit-tokens" : "x-ratelimit-limit-requests");
+
+  var unidad = esTokens ? "tokens" : "consultas";
+  var limF = fmtNum(limit);
+  var usedF = fmtNum(used);
+
+  if (esDia) {
+    var out = "⛔ Límite DIARIO alcanzado";
+    if (limF) out += ": " + limF + " " + unidad + "/día";
+    if (usedF) out += " (ya usaste " + usedF + ")";
+    out += ". Se renueva a medianoche (hora del Pacífico).";
+    return out;
+  }
+
+  var out2 = "⏳ Límite POR MINUTO alcanzado";
+  if (limF) out2 += ": " + limF + " " + unidad + "/min";
+  if (usedF) out2 += " (usaste " + usedF + " este minuto)";
+  out2 += ". Espera un minuto y reintenta, o vuelve a enviar tu pregunta más corta.";
+  return out2;
 }
 
 async function callGroq(apiKey, systemPrompt, messages, maxTokens) {
@@ -165,11 +198,16 @@ async function callGroq(apiKey, systemPrompt, messages, maxTokens) {
       }),
     });
 
-    if (res.status === 429) {
-      return Response.json({ error: "Estás al límite de Groq por ahora (tokens por minuto o del día). Espera un minuto y reintenta, o revisa tu consumo diario en el dashboard." }, { status: 429 });
-    }
-
     var data = await res.json();
+
+    if (res.status === 429 || (data && data.error && /rate.?limit/i.test(data.error.message || ""))) {
+      var hasBigMaterial = false;
+      for (var mi = 0; mi < groqMessages.length; mi++) {
+        var mc = groqMessages[mi].content || "";
+        if (groqMessages[mi].role === "user" && mc.indexOf("MATERIAL DE REFERENCIA") !== -1 && mc.length > 8000) { hasBigMaterial = true; break; }
+      }
+      return Response.json({ error: buildRateMsg(res, data), canSummarize: hasBigMaterial }, { status: 429 });
+    }
 
     if (data.error) {
       return Response.json({ error: data.error.message || "Groq API error" }, { status: 500 });
