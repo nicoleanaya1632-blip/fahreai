@@ -940,25 +940,34 @@ function ChatView({ conv, typingTwinKey, onBack, onSend, onAddTwin, onSaveLearni
 }
 
 // ─── BARRA DE CONSUMO (izq: tokens por minuto · der: consultas del día) ──────
+// Groq repone tokens de forma continua (límite ÷ 60 por segundo), así que la barra
+// del minuto se recalcula sola cada segundo aunque no haya nuevas respuestas.
 function UsageBar({ limits }) {
-  if (!limits) return null;
+  var tickState = useState(0); var setTick = tickState[1];
+  useEffect(function() {
+    var id = setInterval(function() { setTick(function(t) { return t + 1; }); }, 1000);
+    return function() { clearInterval(id); };
+  }, []);
 
-  function pctUsed(limit, remaining) {
-    if (!limit || remaining === null || remaining === undefined) return null;
-    return Math.max(0, Math.min(100, ((limit - remaining) / limit) * 100));
+  var tokensLimit = (limits && limits.tokensLimit) || 12000;
+  var refillPerSec = tokensLimit / 60;
+
+  var effRemaining = tokensLimit;
+  if (limits && limits.tokensRemaining !== null && limits.tokensRemaining !== undefined) {
+    var elapsed = limits.at ? (Date.now() - limits.at) / 1000 : 0;
+    effRemaining = Math.min(tokensLimit, limits.tokensRemaining + refillPerSec * elapsed);
   }
+  var tPct = Math.max(0, Math.min(100, ((tokensLimit - effRemaining) / tokensLimit) * 100));
+
+  var reqLimit = limits && limits.reqLimit ? limits.reqLimit : null;
+  var reqRem = limits && limits.reqRemaining !== null && limits.reqRemaining !== undefined ? limits.reqRemaining : null;
+  var rPct = (reqLimit && reqRem !== null) ? Math.max(0, Math.min(100, ((reqLimit - reqRem) / reqLimit) * 100)) : 0;
+
   function colorFor(p) {
     if (p >= 85) return "#c0392b";
     if (p >= 60) return "#d68910";
     return INK;
   }
-
-  var tPct = pctUsed(limits.tokensLimit, limits.tokensRemaining);
-  var rPct = pctUsed(limits.reqLimit, limits.reqRemaining);
-  if (tPct === null && rPct === null) return null;
-
-  var tReset = limits.tokensReset ? String(limits.tokensReset).trim() : null;
-  var rRem = limits.reqRemaining;
 
   var barStyle = { width: 110, height: 5, borderRadius: 3, background: "rgba(20,20,20,0.08)", overflow: "hidden", flexShrink: 0 };
   var labelStyle = { fontSize: 10, fontFamily: MONO, color: TEXT_MUTED, whiteSpace: "nowrap" };
@@ -970,28 +979,20 @@ function UsageBar({ limits }) {
       background: CARD, border: "1px solid " + BORDER, borderRadius: 999,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
-        {tPct !== null && (
-          <span style={labelStyle}>
-            {"Minuto: " + Math.round(tPct) + "%"}{tReset ? " · repone en " + tReset : ""}
-          </span>
-        )}
-        {tPct !== null && (
-          <div style={barStyle}>
-            <div style={{ width: tPct + "%", height: "100%", background: colorFor(tPct), borderRadius: 3, transition: "width 0.4s" }} />
-          </div>
-        )}
+        <span style={labelStyle}>
+          {"Minuto: " + Math.round(tPct) + "%"}{tPct >= 1 ? " · renueva en unos segundos" : ""}
+        </span>
+        <div style={barStyle}>
+          <div style={{ width: tPct + "%", height: "100%", background: colorFor(tPct), borderRadius: 3, transition: "width 0.9s linear" }} />
+        </div>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
-        {rPct !== null && (
-          <div style={barStyle}>
-            <div style={{ width: rPct + "%", height: "100%", background: colorFor(rPct), borderRadius: 3, transition: "width 0.4s" }} />
-          </div>
-        )}
-        {rPct !== null && (
-          <span style={labelStyle}>
-            {"Hoy: " + Math.round(rPct) + "%"}{(rRem !== null && rRem !== undefined) ? " · quedan " + Math.round(rRem) : ""}
-          </span>
-        )}
+        <div style={barStyle}>
+          <div style={{ width: rPct + "%", height: "100%", background: colorFor(rPct), borderRadius: 3, transition: "width 0.4s" }} />
+        </div>
+        <span style={labelStyle}>
+          {"Hoy: " + Math.round(rPct) + "%"}{reqRem !== null ? " · quedan " + Math.round(reqRem) + " consultas" : ""}
+        </span>
       </div>
     </div>
   );
@@ -1625,7 +1626,21 @@ export default function Home() {
     // en la conversación. Desde ahí los twins siempre trabajan con el resumen, nunca con el texto completo.
     if (lastUser && lastUser.apiContent) {
       var mIdx = lastUser.apiContent.indexOf("---\nMATERIAL DE REFERENCIA");
-      if (mIdx !== -1 && lastUser.apiContent.substring(mIdx).length > 3000) {
+
+      // ¿Cabe la petición completa en el límite por minuto? Si sí, el documento va entero.
+      var TOPE_PETICION = (limRef.current && limRef.current.tokensLimit ? limRef.current.tokensLimit : 12000) - 1000;
+      var promptChars = 0;
+      for (var pk = 0; pk < twinKeys.length; pk++) {
+        var pi = twinInfo(twinKeys[pk]);
+        if (pi && pi.member.prompt.length > promptChars) promptChars = pi.member.prompt.length;
+      }
+      var threadChars = 0;
+      for (var tk = 0; tk < thread.length; tk++) {
+        threadChars += ((thread[tk].apiContent || thread[tk].text) || "").length;
+      }
+      var estPeticion = Math.ceil((promptChars + threadChars) / 4) + 900;
+
+      if (mIdx !== -1 && estPeticion > TOPE_PETICION) {
         setTyping(function(prev) { var next = Object.assign({}, prev); next[convId] = twinKeys[0]; return next; });
         var qPart = lastUser.apiContent.substring(0, mIdx).trim();
         var mPart = lastUser.apiContent.substring(mIdx);
@@ -1649,15 +1664,14 @@ export default function Home() {
 
     for (var i = 0; i < twinKeys.length; i++) {
       var key = twinKeys[i];
-      if (i > 0) {
-        await new Promise(function(resolve) { setTimeout(resolve, 20000); });
-      }
-      setTyping(function(prev) { var next = Object.assign({}, prev); next[convId] = key; return next; });
       var info = twinInfo(key);
       var apiMessages = buildApiMessages(thread, key, multi, compactState);
+      // Espera adaptativa: cero segundos si hay presupuesto, o solo los necesarios
+      await waitForBudget(estimateTokens(info.member.prompt, apiMessages));
+      setTyping(function(prev) { var next = Object.assign({}, prev); next[convId] = key; return next; });
       var resp = await callTwin(info.member.prompt, apiMessages, img ? img.base64 : null, img ? img.mime : null);
       var raw = resp.text;
-      if (resp.limits) setLimits(resp.limits);
+      if (resp.limits) recordLimits(resp.limits);
       var parsedResp = parseConfidence(raw);
       var ts = Date.now();
       var named = isNamedTwin(key);
@@ -1729,6 +1743,34 @@ export default function Home() {
 
   var hoState = useState(false); var handoffBusy = hoState[0]; var setHandoffBusy = hoState[1];
   var limState = useState(null); var limits = limState[0]; var setLimits = limState[1];
+  var limRef = useRef(null);
+
+  var recordLimits = function(l) {
+    if (!l) return;
+    var stamped = Object.assign({}, l, { at: Date.now() });
+    limRef.current = stamped;
+    setLimits(stamped);
+  };
+
+  // Estima el costo de una petición (≈4 caracteres por token + espacio de respuesta)
+  var estimateTokens = function(systemPrompt, apiMessages) {
+    var chars = (systemPrompt || "").length;
+    for (var i = 0; i < apiMessages.length; i++) chars += (apiMessages[i].content || "").length;
+    return Math.ceil(chars / 4) + 900;
+  };
+
+  // Espera SOLO lo necesario: Groq repone (límite ÷ 60) tokens por segundo.
+  var waitForBudget = async function(estTokens) {
+    var L = limRef.current;
+    if (!L || !L.tokensLimit) return;
+    var refill = L.tokensLimit / 60;
+    var elapsed = (Date.now() - L.at) / 1000;
+    var avail = Math.min(L.tokensLimit, (L.tokensRemaining || 0) + refill * elapsed);
+    var deficit = estTokens - avail;
+    if (deficit <= 0) return;
+    var waitSec = Math.min(60, Math.ceil(deficit / refill) + 1);
+    await new Promise(function(r) { setTimeout(r, waitSec * 1000); });
+  };
 
   // Genera un resumen de la conversación y abre un chat nuevo con ese contexto cargado
   var createHandoffChat = async function(convId) {
