@@ -532,9 +532,9 @@ async function callTwin(systemPrompt, messages, imageBase64, imageMime) {
       body: JSON.stringify(payload),
     });
     var data = await res.json();
-    if (data.error) return "⚠️ " + data.error;
-    return data.text;
-  } catch (e) { return "⚠️ Error de conexión. Intenta de nuevo."; }
+    if (data.error) return { text: "⚠️ " + data.error, canSummarize: !!data.canSummarize };
+    return { text: data.text };
+  } catch (e) { return { text: "⚠️ Error de conexión. Intenta de nuevo." }; }
 }
 
 // ─── SHARED COMPONENTS ───────────────────────────────────────────────────────
@@ -619,7 +619,7 @@ function ConfidenceBadge({ level, reason }) {
   );
 }
 
-function MessageBubble({ msg, showSpeaker, onSaveLearning, isSaved }) {
+function MessageBubble({ msg, showSpeaker, onSaveLearning, isSaved, onRetrySummary }) {
   var isUser = msg.role === "user";
   var info = !isUser ? twinInfo(msg.twinKey) : null;
   var speakerName = info ? info.member.name : "Twin";
@@ -654,6 +654,16 @@ function MessageBubble({ msg, showSpeaker, onSaveLearning, isSaved }) {
             })}
           </div>
         </div>
+        {onRetrySummary && (
+          <button onClick={onRetrySummary} className="fa-hover" style={{
+            marginTop: 8, display: "inline-flex", alignItems: "center", gap: 7,
+            padding: "8px 16px", borderRadius: 999, background: YELLOW,
+            border: "1px solid " + YELLOW, color: INK, fontSize: 12.5,
+            fontFamily: MONO, fontWeight: 700, cursor: "pointer",
+          }}>
+            ↻ Continuar con resumen del documento
+          </button>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: isUser ? "flex-end" : "flex-start", marginTop: 4, marginBottom: 12, flexWrap: "wrap" }}>
           {!isUser && isNamedTwin(msg.twinKey) && <ConfidenceBadge level={msg.confidence} reason={msg.confidenceReason} />}
           {!isUser && onSaveLearning && msg.text && msg.text.indexOf("\u26A0\uFE0F") !== 0 && (
@@ -683,7 +693,7 @@ function MessageBubble({ msg, showSpeaker, onSaveLearning, isSaved }) {
 }
 
 // ─── VISTA CHAT (pantalla completa, multi-twin) ──────────────────────────────
-function ChatView({ conv, typingTwinKey, onBack, onSend, onAddTwin, onSaveLearning, savedIds }) {
+function ChatView({ conv, typingTwinKey, onBack, onSend, onAddTwin, onSaveLearning, savedIds, onRetrySummary }) {
   var participants = conv.twinKeys.map(twinInfo).filter(Boolean);
   var multi = conv.twinKeys.length > 1;
   var pending = !!typingTwinKey;
@@ -806,7 +816,8 @@ function ChatView({ conv, typingTwinKey, onBack, onSend, onAddTwin, onSaveLearni
         {conv.messages.map(function(msg, i) {
           return <MessageBubble key={i} msg={msg} showSpeaker={true}
             onSaveLearning={msg.role === "assistant" ? function(m) { onSaveLearning(conv, m); } : null}
-            isSaved={msg.role === "assistant" && savedIds.indexOf(conv.id + ":" + msg.ts) !== -1} />;
+            isSaved={msg.role === "assistant" && savedIds.indexOf(conv.id + ":" + msg.ts) !== -1}
+            onRetrySummary={msg.retrySummary && onRetrySummary && !typingTwinKey ? function() { onRetrySummary(conv.id, msg.retryTwinKey); } : null} />;
         })}
         {pending && typingInfo && (
           <div className="fa-msg" style={{ display: "flex", gap: 10, marginBottom: 12 }}>
@@ -1498,7 +1509,8 @@ export default function Home() {
       setTyping(function(prev) { var next = Object.assign({}, prev); next[convId] = key; return next; });
       var info = twinInfo(key);
       var apiMessages = buildApiMessages(thread, key, multi);
-      var raw = await callTwin(info.member.prompt, apiMessages, img ? img.base64 : null, img ? img.mime : null);
+      var resp = await callTwin(info.member.prompt, apiMessages, img ? img.base64 : null, img ? img.mime : null);
+      var raw = resp.text;
       var parsedResp = parseConfidence(raw);
       var ts = Date.now();
       var named = isNamedTwin(key);
@@ -1513,6 +1525,7 @@ export default function Home() {
         });
       }
       var asstMsg = { role: "assistant", twinKey: key, text: parsedResp.clean, confidence: named ? parsedResp.level : null, confidenceReason: named ? parsedResp.reason : null, ts: ts };
+      if (raw.indexOf("⚠️") === 0 && resp.canSummarize) { asstMsg.retrySummary = true; asstMsg.retryTwinKey = key; }
       thread = thread.concat([asstMsg]);
       var threadSnapshot = thread;
       updateConv(convId, function(c) {
@@ -1562,6 +1575,40 @@ export default function Home() {
 
     await runTwins(conv.id, twinKeys, conv.messages, multi, img);
     setRunning(false);
+  };
+
+  var retryWithSummary = async function(convId, twinKey) {
+    var conv = history.filter(function(c) { return c.id === convId; })[0];
+    if (!conv) return;
+    var lastUser = null;
+    for (var j = conv.messages.length - 1; j >= 0; j--) {
+      if (conv.messages[j].role === "user") { lastUser = conv.messages[j]; break; }
+    }
+    if (!lastUser || !lastUser.apiContent) return;
+    var mIdx = lastUser.apiContent.indexOf("---\nMATERIAL DE REFERENCIA");
+    if (mIdx === -1) return;
+    setTyping(function(prev) { var next = Object.assign({}, prev); next[convId] = twinKey; return next; });
+    var qPart = lastUser.apiContent.substring(0, mIdx).trim();
+    var mPart = lastUser.apiContent.substring(mIdx);
+    var newContent = null;
+    try {
+      var sres = await fetch("/api/sparring", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summarizeMaterial: mPart }),
+      });
+      var sdata = await sres.json();
+      if (sdata && sdata.summary) newContent = qPart + "\n\n---\nRESUMEN DEL MATERIAL:\n" + sdata.summary;
+    } catch (e) {}
+    if (!newContent) {
+      setTyping(function(prev) { var next = Object.assign({}, prev); delete next[convId]; return next; });
+      return;
+    }
+    var targetTs = lastUser.ts;
+    var newThread = conv.messages
+      .filter(function(m) { return !(m.retrySummary && m.retryTwinKey === twinKey); })
+      .map(function(m) { return m.ts === targetTs && m.role === "user" ? Object.assign({}, m, { apiContent: newContent }) : m; });
+    updateConv(convId, function(c) { return Object.assign({}, c, { messages: newThread }); });
+    await runTwins(convId, [twinKey], newThread, conv.twinKeys.length > 1, null);
   };
 
   var handleSend = async function(convId, text, attach) {
@@ -1674,6 +1721,7 @@ export default function Home() {
               onAddTwin={handleAddTwin}
               onSaveLearning={saveLearning}
               savedIds={savedIds}
+              onRetrySummary={retryWithSummary}
             />
           ) : view.type === "prompts" ? (
             <div style={{ paddingTop: 44 }}>
