@@ -1069,8 +1069,8 @@ function AreaCard({ areaId, area, selected, onToggle }) {
               <span style={{
                 color: isNamed ? INK : (isOn ? INK : TEXT_MUTED),
                 fontWeight: isNamed ? 800 : 500,
-                fontSize: isNamed ? 13.5 : 12,
-                fontFamily: isNamed ? SANS : MONO,
+                fontSize: isNamed ? 13.5 : 12.5,
+                fontFamily: SANS,
                 letterSpacing: "0.01em",
               }}>{member.name}</span>
             </button>
