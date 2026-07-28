@@ -195,7 +195,9 @@ var TEXT = "#141414";
 var TEXT_DIM = "#5F5D57";
 var TEXT_MUTED = "#98968F";
 
-var MONO = "'JetBrains Mono', 'Courier New', monospace";
+// Antes era monoespaciada. Ahora usa la misma familia sans que el resto de la app:
+// las etiquetas de sistema se siguen distinguiendo por mayúsculas y letter-spacing.
+var MONO = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, Helvetica, Arial, sans-serif";
 var SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, Helvetica, Arial, sans-serif";
 
 var LS_KEY = "fahreai_history_v1";
