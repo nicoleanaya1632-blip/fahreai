@@ -1027,9 +1027,11 @@ function UsageBar({ limits }) {
   var labelStyle = { fontSize: 10, fontFamily: MONO, color: TEXT_MUTED, whiteSpace: "nowrap" };
 
   return (
+    <div style={{ marginTop: 8 }}>
+    <div style={{ fontSize: 9.5, fontFamily: MONO, fontWeight: 700, color: TEXT_MUTED, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 5, paddingLeft: 17 }}>Límites de uso</div>
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16,
-      padding: "8px 16px", marginTop: 8,
+      padding: "8px 16px",
       background: CARD, border: "1px solid " + BORDER, borderRadius: 999,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
@@ -1048,6 +1050,7 @@ function UsageBar({ limits }) {
           {"Hoy: " + Math.round(rPct) + "% · " + dayUsed + " de " + dayLimit + " consultas"}
         </span>
       </div>
+    </div>
     </div>
   );
 }
@@ -1070,8 +1073,7 @@ function AreaCard({ areaId, area, selected, onToggle }) {
         border: "1px solid " + YELLOW, display: "flex", alignItems: "center",
         justifyContent: "center", fontSize: 18, color: INK, marginBottom: 12, fontFamily: MONO,
       }}>{area.icon}</div>
-      <div style={{ fontWeight: 800, color: INK, fontSize: 14, fontFamily: MONO, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>{area.name}</div>
-      <div style={{ fontSize: 12.5, color: TEXT_DIM, fontFamily: SANS, lineHeight: 1.45, marginBottom: 14, minHeight: 36 }}>{area.desc}</div>
+      <div style={{ fontWeight: 800, color: INK, fontSize: 14, fontFamily: MONO, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 14 }}>{area.name}</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {memberIds.map(function(memberId) {
           var member = area.members[memberId];
@@ -1092,7 +1094,6 @@ function AreaCard({ areaId, area, selected, onToggle }) {
                 display: "inline-flex", alignItems: "center", justifyContent: "center",
                 flexShrink: 0, fontSize: 9, color: INK, fontWeight: 900,
               }}>{isOn ? "✓" : ""}</span>
-              {isNamed && <span style={{ color: YELLOW, fontSize: 11, flexShrink: 0, lineHeight: 1 }}>★</span>}
               <span style={{
                 color: isNamed ? INK : (isOn ? INK : TEXT_MUTED),
                 fontWeight: isNamed ? 800 : 500,
@@ -1270,10 +1271,8 @@ function LearningsView({ items, onBack, onDelete, onOpenConv, onEditNote }) {
   var searchState = useState(""); var q = searchState[0]; var setQ = searchState[1];
   var editState = useState(null); var editing = editState[0]; var setEditing = editState[1];
   var draftState = useState(""); var draft = draftState[0]; var setDraft = draftState[1];
-  var tabState = useState("all"); var tab = tabState[0]; var setTab = tabState[1];
 
-  var twinItems = items.filter(function(l) { return l.kind !== "checker"; });
-  var scoped = tab === "twins" ? twinItems : items;
+  var scoped = items;
 
   var filtered = scoped.filter(function(l) {
     if (!q.trim()) return true;
@@ -1309,29 +1308,6 @@ function LearningsView({ items, onBack, onDelete, onOpenConv, onEditNote }) {
       <p style={{ fontSize: 13, color: TEXT_DIM, fontFamily: SANS, margin: "0 0 22px 56px", lineHeight: 1.6, maxWidth: 520 }}>
         Tu compendio privado de feedback recurrente. Se guarda solo en este navegador — nadie más lo ve.
       </p>
-
-      {items.length > 0 && (
-        <div style={{ display: "flex", gap: 6, marginBottom: 16, borderBottom: "1px solid " + BORDER }}>
-          {[
-            { id: "all", label: "Todos", n: items.length },
-            { id: "twins", label: "De los twins", n: twinItems.length },
-          ].map(function(t) {
-            var on = tab === t.id;
-            return (
-              <button key={t.id} onClick={function() { setTab(t.id); setEditing(null); }} style={{
-                background: "none", border: "none", cursor: "pointer",
-                padding: "9px 14px", position: "relative",
-                fontSize: 12.5, fontFamily: SANS, fontWeight: on ? 700 : 400,
-                color: on ? INK : TEXT_MUTED,
-              }}>
-                {t.label}
-                <span style={{ fontFamily: MONO, fontSize: 10, color: TEXT_MUTED, marginLeft: 6 }}>{t.n}</span>
-                {on && <div style={{ position: "absolute", left: 8, right: 8, bottom: -1, height: 2, background: YELLOW, borderRadius: 2 }} />}
-              </button>
-            );
-          })}
-        </div>
-      )}
 
       {items.length > 0 && (
         <input
@@ -1471,16 +1447,6 @@ function LearningsView({ items, onBack, onDelete, onOpenConv, onEditNote }) {
           <span style={{ fontSize: 11.5, color: TEXT_MUTED, fontFamily: SANS }}>
             Tus aprendizajes viven solo en este navegador.
           </span>
-          <button
-            onClick={function() {
-              alert("Sincronizar entre dispositivos\n\nEsta función aún no está disponible. Por ahora tus aprendizajes se guardan solo en este navegador.\n\nSi te sirve tenerlos en tu celular o en otra compu, avísale a Nicole — mientras más gente lo pida, antes se construye.");
-            }}
-            style={{
-              background: "none", border: "none", padding: 0, cursor: "pointer",
-              fontSize: 11.5, fontFamily: MONO, color: TEXT_DIM,
-              borderBottom: "1px solid " + BORDER, letterSpacing: "0.03em",
-            }}
-          >Sincronizar entre dispositivos →</button>
         </div>
       )}
     </div>
@@ -2159,7 +2125,7 @@ export default function Home() {
                   by <span style={{ fontWeight: 800 }}>fahrenheit</span><sup style={{ fontSize: 10, fontWeight: 800 }}>DDB</sup>
                 </div>
                 <p style={{ fontSize: 15, color: TEXT_DIM, margin: "22px 0 0", fontFamily: SANS, lineHeight: 1.6, maxWidth: 460 }}>
-                  Una herramienta compartida para hacer mejores preguntas, obtener nuevas perspectivas y seguir aprendiendo juntos.
+                  Una herramienta para preguntarle a tus líderes y acercarte a su mirada.
                 </p>
                 <div style={{
                   display: "inline-flex", alignItems: "center", gap: 10,
